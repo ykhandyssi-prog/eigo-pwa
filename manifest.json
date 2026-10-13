@@ -1,0 +1,17 @@
+{
+  "name": "論文プリント採点",
+  "short_name": "論文英語",
+  "description": "論文英語プリントの答えを入れて、その場で採点する",
+  "start_url": "./index.html",
+  "scope": "./",
+  "id": "/eigo-pwa/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F3F4F7",
+  "theme_color": "#34508A",
+  "lang": "ja",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
