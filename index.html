@@ -58,6 +58,12 @@ textarea{width:100%;min-height:60px;resize:vertical}
 .opt[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 .opt:disabled{cursor:default}
 .mark{font-size:24px;line-height:1;font-weight:700;text-align:center;color:var(--red)}
+.mark.sent{font-size:13px;color:var(--muted)}
+.opts{flex-wrap:wrap;align-items:center;min-width:0}
+.txt{font:inherit;color:var(--ink);background:var(--ground);border:1.5px solid var(--line);border-radius:8px;padding:6px 8px;width:100%;min-width:0}
+textarea.txt{resize:vertical}
+.seq{font-size:13px;color:var(--muted);flex-basis:100%}
+.chipbtn{border:1px solid var(--line);background:transparent;color:var(--muted);font:inherit;font-size:12.5px;padding:3px 10px;border-radius:999px;cursor:pointer}
 .sfoot{padding:10px 14px 14px;display:flex;flex-direction:column;gap:6px}
 .msg{font-size:13px;color:var(--muted);margin:0;min-height:1.2em}
 .score{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
@@ -187,8 +193,24 @@ let saveTimer = null;
 function toast(msg){ const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove("show"), 1800); }
 function el(tag, attrs = {}, text){ const e = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); if (text != null) e.textContent = text; return e; }
 
+/* ---------- 問の形式（2026-10-13） ----------
+   choice 選択：番号を押す／short 短答：打つ（大文字小文字・前後の空白・末尾のピリオドは無視して照らす）／
+   order 並べ替え：番号を順に押す／written 記述：打って送るだけ（採点しない＝全部 ○ の対象外。/eigo-review で Claude が見る）。
+   PC が qs（[{t, n, a}]）を送る。古い紙は key（選択の答えだけ）しか無いので、選択4択として読む。 */
+const qsOf = s => Array.isArray(s.qs) ? s.qs : s.key.map(a => ({ t: "choice", n: 4, a }));
+const normShort = v => { let x = String(v || "").trim().toLowerCase().split(/\s+/).join(" "); if (x.endsWith(".")) x = x.slice(0, -1).trimEnd(); return x; };
+const normOrder = v => String(v || "").replace(/\D/g, "");
+function judge(q, v){
+  if (q.t === "written") return "w";
+  if (q.t === "short") return (q.a || []).some(a => normShort(a) === normShort(v));
+  if (q.t === "order") return normOrder(v) === normOrder(q.a);
+  return v === q.a;
+}
+const filled = v => v !== null && v !== undefined && String(v).trim() !== "";
+
 /* ---------- 記録 ---------- */
 const nOf = s => s.items.length;
+const autoN = s => qsOf(s).filter(q => q.t !== "written").length;
 function freshRound(qs){ return { qs, sel: qs.map(() => null), ok: qs.map(() => null) }; }
 function freshState(s){ return { start: "", end: "", unknown: "", rounds: [freshRound([...Array(nOf(s)).keys()])], doneAt: null }; }
 function stateOf(s){
@@ -198,8 +220,8 @@ function stateOf(s){
 }
 const graded = r => r.ok.length > 0 && r.ok.every(v => v !== null);
 const last = () => st.rounds[st.rounds.length - 1];
-function firstOk(){ const r = st.rounds[0]; return graded(r) ? r.ok.filter(Boolean).length : 0; }
-const pts = n => Math.round(n / nOf(sheets[cur]) * 100);
+function firstOk(){ const r = st.rounds[0]; return graded(r) ? r.ok.filter(v => v === true).length : 0; }
+const pts = n => { const d = autoN(sheets[cur]); return d ? Math.round(n / d * 100) : 0; };
 function minutes(){
   if (!st.start || !st.end) return null;
   const [a, b] = [st.start, st.end].map(t => t.split(":").map(Number));
@@ -223,13 +245,17 @@ function pick(q, c){
   r.sel[i] = r.sel[i] === c ? null : c;
   pinned = true; save(); render();
 }
+function setText(q, v, rerender){
+  const r = last(), i = r.qs.indexOf(q);
+  r.sel[i] = v; pinned = true; save(); if (rerender) render();
+}
 
 function grade(){
-  const s = sheets[cur], r = last();
-  const empty = r.qs.filter((q, i) => !r.sel[i]);
-  if (empty.length) { $("msg").textContent = "まだ選んでいない問があります：" + empty.map(q => s.items[q]).join("・"); return; }
-  r.ok = r.qs.map((q, i) => r.sel[i] === s.key[q]);
-  const wrong = r.qs.filter((q, i) => !r.ok[i]);
+  const s = sheets[cur], r = last(), qs = qsOf(s);
+  const empty = r.qs.filter((q, i) => !filled(r.sel[i]));
+  if (empty.length) { $("msg").textContent = "まだ答えていない問があります：" + empty.map(q => s.items[q]).join("・"); return; }
+  r.ok = r.qs.map((q, i) => judge(qs[q], r.sel[i]));
+  const wrong = r.qs.filter((q, i) => r.ok[i] === false);
   if (wrong.length) st.rounds.push(freshRound(wrong));
   else st.doneAt = new Date().toISOString();
   pinned = true; save(true); render();
@@ -242,20 +268,44 @@ function buildRound(s, r, idx){
   const box = el("div", { class: "sheet" + (active ? " active" : " locked") + (idx > 0 ? " fix" : "") });
   const head = el("div", { class: "shead" });
   head.append(el("h2", {}, idx === 0 ? `1回目（全${r.qs.length}問）` : `直し ${idx}回目（${r.qs.length}問）`));
-  if (graded(r)) head.append(el("span", { class: "pts" }, `○ ${r.ok.filter(Boolean).length}／${r.qs.length}`));
+  if (graded(r)) {
+    const auto = r.ok.filter(v => v !== "w");
+    if (auto.length) head.append(el("span", { class: "pts" }, `○ ${auto.filter(v => v === true).length}／${auto.length}`));
+  }
   box.append(head);
+  const qs = qsOf(s);
   let lastSec = "";
   r.qs.forEach((q, i) => {
     const sec = sectionOf(s, q);
     if (sec !== lastSec) { box.append(el("div", { class: "sec" }, sec)); lastSec = sec; }
     const row = el("div", { class: "row" + (r.ok[i] === false ? " x" : "") });
-    const opts = el("div", { class: "opts" });
-    CIRC.forEach((c, j) => {
-      const b = el("button", { class: "opt", type: "button", id: `${cur}-r${idx}-q${q}-c${j + 1}`, "aria-pressed": String(r.sel[i] === j + 1), "aria-label": `${s.items[q]} の ${j + 1} 番` }, c);
-      if (active) b.onclick = () => pick(q, j + 1); else b.disabled = true;
-      opts.append(b);
-    });
-    row.append(el("span", { class: "qn" }, s.items[q]), opts, el("span", { class: "mark" }, r.ok[i] === null ? "" : (r.ok[i] ? "○" : "×")));
+    const t = qs[q].t, base = `${cur}-r${idx}-q${q}`;
+    const field = el("div", { class: "opts" });
+    if (t === "choice" || t === "order") {
+      const n = qs[q].n || 4;
+      for (let j = 1; j <= n; j++) {
+        const pressed = t === "choice" ? r.sel[i] === j : String(r.sel[i] || "").includes(String(j));
+        const b = el("button", { class: "opt", type: "button", id: `${base}-c${j}`, "aria-pressed": String(pressed), "aria-label": `${s.items[q]} の ${j} 番` }, CIRC[j - 1] || String(j));
+        if (!active) b.disabled = true;
+        else if (t === "choice") b.onclick = () => pick(q, j);
+        else b.onclick = () => { const cur0 = String(r.sel[i] || ""); if (!cur0.includes(String(j))) setText(q, cur0 + j, true); };
+        field.append(b);
+      }
+      if (t === "order") {
+        const seq = String(r.sel[i] || "").split("").map(d => CIRC[+d - 1] || d).join("→");
+        field.append(el("span", { class: "seq", id: `${base}-seq` }, seq || "押した順に並ぶ"));
+        if (active) { const c = el("button", { class: "chipbtn", type: "button", id: `${base}-clear` }, "消す"); c.onclick = () => setText(q, "", true); field.append(c); }
+      }
+    } else {
+      const inp = t === "written"
+        ? el("textarea", { class: "txt", id: `${base}-txt`, rows: "3", placeholder: "紙に書いた答えを打つ（採点は /eigo-review で）" })
+        : el("input", { class: "txt", id: `${base}-txt`, type: "text", autocomplete: "off", autocapitalize: "off", placeholder: "答えを打つ" });
+      inp.value = r.sel[i] || "";
+      if (active) inp.addEventListener("input", e => setText(q, e.currentTarget.value, false)); else inp.disabled = true;
+      field.append(inp);
+    }
+    const mark = r.ok[i] === null ? "" : (r.ok[i] === "w" ? "送" : (r.ok[i] ? "○" : "×"));
+    row.append(el("span", { class: "qn" }, s.items[q]), field, el("span", { class: "mark" + (r.ok[i] === "w" ? " sent" : "") }, mark));
     box.append(row);
   });
   if (active) {
@@ -301,7 +351,9 @@ function render(){
   $("donebox").hidden = !st.doneAt;
   if (st.doneAt) {
     const m = minutes(), x = st.rounds.length - 1;
-    $("doneMsg").textContent = `1回目 ${pts(firstOk())}点` + (x ? `・直し ${x}回` : "") + (m === null ? "・開始と終了の時刻を入れると、かかった時間も残ります" : `・${m}分`) + "。知らなかった語は後から足しても届きます。";
+    const w = qsOf(s).filter(q => q.t === "written").length;
+    $("doneMsg").textContent = `1回目 ${pts(firstOk())}点` + (x ? `・直し ${x}回` : "") + (m === null ? "・開始と終了の時刻を入れると、かかった時間も残ります" : `・${m}分`) + "。"
+      + (w ? `記述 ${w}問の答えは送ってあり、/eigo-review で Claude が採点して直します。` : "") + "知らなかった語は後から足しても届きます。";
   }
   renderDays();
 }
@@ -350,11 +402,15 @@ function stopSync(){ if (unsub) { unsub(); unsub = null; } }
 
 function startDemo(){
   $("demoBanner").hidden = false;
-  const items = ["復1", "復2", "問1", "問2", "問3", "問4", "問5", "問6", "問7", "問8", "問9", "問10"];
+  const items = ["復1", "復2", "問1", "問2", "問3", "問4", "問5", "問6", "問7", "問8", "問9", "問10", "問11"];
+  const qs = items.map(() => ({ t: "choice", n: 4, a: 1 }));
+  qs[10] = { t: "short", n: 0, a: ["urgent"] };   // 問9 短答：urgent
+  qs[11] = { t: "order", n: 4, a: "4231" };       // 問10 並べ替え：④②③①
+  qs[12] = { t: "written", n: 0 };                // 問11 記述
   applySheets({
-    "99_demo": { id: "99_demo", no: "99", title: "見本", sub: "段階1（簡約版あり）／見本の答えは全部 ①", order: 99, items,
-      sections: [{ name: "前回の復習", from: 0, to: 1 }, { name: "A 語", from: 2, to: 6 }, { name: "B 簡約版", from: 7, to: 8 }, { name: "C 原文", from: 9, to: 11 }],
-      key: items.map(() => 1) }
+    "99_demo": { id: "99_demo", no: "99", title: "見本", sub: "見本の答え＝選択は全部 ①・問9 は urgent・問10 は ④②③①", order: 99, items, qs,
+      sections: [{ name: "前回の復習", from: 0, to: 1 }, { name: "A 語", from: 2, to: 6 }, { name: "B 簡約版", from: 7, to: 8 }, { name: "C 原文", from: 9, to: 12 }],
+      key: qs.map(q => q.t === "choice" ? q.a : null) }
   });
 }
 
